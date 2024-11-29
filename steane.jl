@@ -1,10 +1,12 @@
 using ITensors
+using Plots
 
 # Define the site indices for 7 qubits
 N = 7
 s = siteinds("S=1/2", N)
 
-# Add X and Z operator definitions
+# Existing operator and initialization functions from the previous implementation
+# (Copying over the functions from the original code)
 function ITensors.op(::OpName"Z", ::SiteType"S=1/2", s::Index)
     mat = [1 0
            0 -1]
@@ -23,9 +25,6 @@ function ITensors.op(::OpName"H", ::SiteType"S=1/2", s::Index)
     return ITensor(mat, s', s)
 end
 
-
-
-# Initialize logical state |ψ⟩ = α|0⟩ + β|1⟩
 function initialize_state(α::Number, β::Number)
     ψ = MPS(s)
     
@@ -40,7 +39,6 @@ function initialize_state(α::Number, β::Number)
     return normalize!(ψ)
 end
 
-# Encode into Steane code
 function encode_steane(ψ::MPS)
     encoding_ops = [
         ("H", 5), ("H", 6), ("H", 7),  # Create |+⟩ states
@@ -53,32 +51,25 @@ function encode_steane(ψ::MPS)
     return normalize!(ψ_encoded)
 end
 
-# Function to create identity plus/minus Pauli operator for a single site
-function create_site_projector(operator_type::String, sign::Int, s::Index)
-    if operator_type == "Z"
-        # (I ± Z)/2 = [1±1 0; 0 1∓1]/2
-        return ITensor([1.0+sign 0.0; 0.0 1.0-sign]/2.0, s', s)
-    else # X
-        # (I ± X)/2 = [1 ±1; ±1 1]/2
-        return ITensor([1.0 sign; sign 1.0]/2.0, s', s)
-    end
-end
-
-# Function to compute syndrome probabilities correctly with MPS structure
+# Updated compute_syndrome_probabilities function
 function compute_syndrome_probabilities(ψ::MPS)
     probs = Dict{Tuple{Int,Int,Int,Int,Int,Int}, Float64}()
     
     # Define the stabilizer operators and their locations
     stabilizers = [
-        ("X", [1,2,3,4]),  # X1234
-        ("X", [1,2,5,6]),  # X1256
+        ("X", [4,5,6,7]),  # X4567
+        ("X", [2,3,6,7]),  # X2367
         ("X", [1,3,5,7]),  # X1357
-        ("Z", [1,2,3,4]),  # Z1234
-        ("Z", [1,2,5,6]),  # Z1256
+        ("Z", [4,5,6,7]),  # Z4567
+        ("Z", [2,3,6,7]),  # Z2367
         ("Z", [1,3,5,7])   # Z1357
     ]
     
-    # Iterate through all possible syndrome patterns
+    for j in 1:length(ψ)
+        ψ[j] = noprime(ψ[j])
+    end
+    
+    # Iterate through all possible syndrome patterns (64 combinations)
     for s1 in 0:1, s2 in 0:1, s3 in 0:1, s4 in 0:1, s5 in 0:1, s6 in 0:1
         syndromes = [s1, s2, s3, s4, s5, s6]
         
@@ -88,18 +79,32 @@ function compute_syndrome_probabilities(ψ::MPS)
         # Apply each stabilizer projector
         for (idx, (op_type, qubits)) in enumerate(stabilizers)
             sign = (-1)^syndromes[idx]
+            # Store original state before applying stabilizer
+            ψ_orig = copy(ψ_projected)
             
-            # Apply projector operators site by site
+            # Apply operator to each qubit in the stabilizer
             for q in qubits
                 ψ_projected = orthogonalize!(ψ_projected, q)
-                projector = create_site_projector(op_type, sign, s[q])
-                ψ_projected[q] = projector * ψ_projected[q]
+                ψ_projected[q] = op(op_type, s[q]) * ψ_projected[q]
             end
+            
+            # Unprime all tensors before addition
+            for j in 1:length(ψ_projected)
+                ψ_projected[j] = noprime(ψ_projected[j])
+            end
+            for j in 1:length(ψ_orig)
+                ψ_orig[j] = noprime(ψ_orig[j])
+            end
+            
+            # Form the projector (I ± S)/2 where S is the stabilizer
+            ψ_projected = (ψ_orig + sign * ψ_projected)/2.0
         end
         
         # Compute probability
-        prob = abs2(inner(ψ, ψ_projected))
-        probs[(s1,s2,s3,s4,s5,s6)] = max(0.0, real(prob))
+        prob = abs2(inner(ψ', ψ_projected))
+        if prob > 1e-10  # Only store non-negligible probabilities
+            probs[(s1,s2,s3,s4,s5,s6)] = prob
+        end
     end
     
     # Normalize probabilities
@@ -111,7 +116,7 @@ function compute_syndrome_probabilities(ψ::MPS)
     return probs
 end
 
-# Function to apply amplitude damping error
+# Apply amplitude damping error
 function apply_amplitude_damping(ψ::MPS, site::Int, γ::Float64)
     ψ = orthogonalize!(ψ, site)
     T = ψ[site]
@@ -142,59 +147,34 @@ function apply_amplitude_damping(ψ::MPS, site::Int, γ::Float64)
     end
 end
 
-# Function to display syndrome probabilities
-function display_syndrome_probabilities(probs::Dict{Tuple{Int,Int,Int,Int,Int,Int}, Float64})
-    println("\nSyndrome Measurement Probabilities:")
-    for (syndrome, prob) in sort(collect(probs))
-        if prob > 0.001  # Only show non-negligible probabilities
-            println("P($(syndrome)) = $(round(prob, digits=4))")
-        end
-    end
-end
-
-# Test function
-function test_steane_code(α::Number, β::Number, γ::Float64, error_site::Int)
+# Comprehensive test function
+function test_steane_code_full_analysis(α::Number, β::Number, γ::Float64)
     # Initialize and encode
     ψ_initial = initialize_state(α, β)
     println("Initial state prepared")
-    display_mps_state(ψ_initial)
 
     ψ_encoded = encode_steane(ψ_initial)
     println("State encoded using Steane code")
-    display_mps_state(ψ_encoded)
 
-    # Apply error
-    ψ_with_error = apply_amplitude_damping(ψ_encoded, error_site, γ)
-    println("\nApplied amplitude damping error with γ = $γ on qubit $error_site")
-    display_mps_state(ψ_with_error)
+    # Apply amplitude damping to all qubits
+    ψ_with_error = copy(ψ_encoded)
+    for error_site in 1:7
+        ψ_with_error = apply_amplitude_damping(ψ_with_error, error_site, γ)
+    end
+    println("\nApplied amplitude damping error with γ = $γ on all qubits")
 
-    # Compute and display syndrome probabilities
+    # Compute syndrome probabilities
     probs = compute_syndrome_probabilities(ψ_with_error)
-    display_syndrome_probabilities(probs)
     
-    return ψ_with_error
+    return ψ_with_error, probs
 end
 
-function display_mps_state(ψ::MPS)
-    N = length(ψ)
-    println("Final state coefficients in computational basis:")
-    # Iterate over all 2^N basis states
-    for i in 0:(2^N - 1)
-        # Generate the binary representation for the basis state
-        bitstring = string(i, base=2, pad=N)  # Use padding to get N bits
-        # Convert the bitstring to basis states (↑ for 0, ↓ for 1)
-        state = [c == '0' ? "↑" : "↓" for c in bitstring]
-       
-        # Calculate the coefficient for this basis state
-        coeff = inner(ψ, MPS(s, state))
-       
-        # Print the basis state and its coefficient if non-zero
-        if abs(coeff) > 1e-10
-            println("|", bitstring, "⟩: ", coeff)
-        end
+# Run test with parameters α, β, γ  
+ψ_final, syndrome_probs = test_steane_code_full_analysis(0.7, 0.7, 0.5)
+
+# Optional: Display non-negligible syndrome probabilities
+for (syndrome, prob) in sort(collect(syndrome_probs), by=x->x[2], rev=true)
+    if prob > 0.001
+        println("P$(syndrome) = $(round(prob, digits=4))")
     end
 end
-
-
-# Run test with interesting parameters
-ψ_final = test_steane_code(0.0, 1.0, 0.0, 2)
